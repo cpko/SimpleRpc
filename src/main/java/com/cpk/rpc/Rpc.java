@@ -10,6 +10,8 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.ServerSocket;
 import java.net.Socket;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -19,10 +21,14 @@ import java.util.concurrent.Executors;
  */
 public class Rpc {
 
-    private ExecutorService executorService = Executors.newCachedThreadPool();
+    private final Map<String, Object> exportedServiceMap = new ConcurrentHashMap<>();
+
+    private final ExecutorService executorService = Executors.newCachedThreadPool();
 
     public void export(final Object service, final int port) throws IOException {
         checkExport(service, port);
+
+        exportedServiceMap.put(service.getClass().getInterfaces()[0].getName(), service);
 
         ServerSocket serverSocket = new ServerSocket(port);
 
@@ -38,13 +44,18 @@ public class Rpc {
                         ois = new ObjectInputStream(socket.getInputStream());
                         oos = new ObjectOutputStream(socket.getOutputStream());
 
-                        String methodName = ois.readUTF();
-                        Class<?>[] parameterTypes = (Class<?>[]) ois.readObject();
-                        Object[] parameters = (Object[]) ois.readObject();
+                        Request request = (Request) ois.readObject();
 
-                        Method method = service.getClass().getMethod(methodName, parameterTypes);
+                        String methodName = request.getMethod();
+                        Class<?>[] parameterTypes = request.getParameterTypes();
+                        Object[] parameters = request.getArgs();
+
+                        Method method = exportedServiceMap.get(request.getService()).getClass().getMethod(methodName, parameterTypes);
                         Object result = method.invoke(service, parameters);
-                        oos.writeObject(result);
+
+                        Response response = new Response();
+                        response.setResult(result);
+                        oos.writeObject(response);
 
                     } catch (Exception e) {
                         e.printStackTrace();
@@ -60,7 +71,7 @@ public class Rpc {
 
     }
 
-    public <T> T refer(Class<T> interfaceClass, final String host, final int port) {
+    public <T> T refer(final Class<T> interfaceClass, final String host, final int port) {
         checkRefer(interfaceClass, host, port);
 
         return (T) Proxy.newProxyInstance(interfaceClass.getClassLoader(), new Class<?>[]{interfaceClass}, new InvocationHandler() {
@@ -72,13 +83,18 @@ public class Rpc {
                 try {
                     socket = new Socket(host, port);
                     oos = new ObjectOutputStream(socket.getOutputStream());
-                    oos.writeUTF(method.getName());
-                    oos.writeObject(method.getGenericParameterTypes());
-                    oos.writeObject(args);
+
+                    Request request = new Request();
+                    request.setService(interfaceClass.getName());
+                    request.setMethod(method.getName());
+                    request.setParameterTypes(method.getParameterTypes());
+                    request.setArgs(args);
+                    oos.writeObject(request);
 
                     ois = new ObjectInputStream(socket.getInputStream());
-                    Object result = ois.readObject();
-                    return result;
+                    Response response = (Response) ois.readObject();
+                    return response.getResult();
+
                 } catch (Exception e) {
                     throw new RuntimeException(e);
                 } finally {
